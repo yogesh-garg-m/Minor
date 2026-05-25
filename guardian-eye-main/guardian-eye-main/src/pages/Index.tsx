@@ -1,6 +1,17 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, type Dispatch, type SetStateAction } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Activity, AlertTriangle, CheckCircle2, Clock, RotateCcw, Scan, Shield } from "lucide-react";
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { VideoUpload } from "@/components/VideoUpload";
 import { ProcessingStatus } from "@/components/ProcessingStatus";
 import { ResultsCard, AnalysisResult } from "@/components/ResultsCard";
@@ -25,12 +36,57 @@ interface ModelPipelineResult {
   maxScore: number;
   meanScore: number;
   nSegments: number;
+  scores: number[];
+  smoothScores: number[];
   timings?: Record<string, number>;
 }
+
+type PipelineStageStatus = "pending" | "running" | "done" | "error";
+
+interface PipelineStage {
+  id: string;
+  label: string;
+  description: string;
+  status: PipelineStageStatus;
+  duration_sec?: number | null;
+  elapsed_sec?: number | null;
+}
+
+const INITIAL_PIPELINE_STAGES: PipelineStage[] = [
+  {
+    id: "upload",
+    label: "UPLOAD",
+    description: "Receiving video file",
+    status: "pending",
+    duration_sec: null,
+  },
+  {
+    id: "preprocess",
+    label: "PREPROCESS",
+    description: "FFmpeg · 224x224 · 30 fps · strip audio",
+    status: "pending",
+    duration_sec: null,
+  },
+  {
+    id: "features",
+    label: "FEATURE EXTRACTION",
+    description: "X3D-M · 16-frame windows · 50% overlap · (N, 2048)",
+    status: "pending",
+    duration_sec: null,
+  },
+  {
+    id: "infer",
+    label: "INFERENCE",
+    description: "MultiScaleTCN + MIL scorer · median smoothing",
+    status: "pending",
+    duration_sec: null,
+  },
+];
 
 const Index = () => {
   const [stage, setStage] = useState<"idle" | "detecting" | "extracting" | "analyzing">("idle");
   const [progress, setProgress] = useState(0);
+  const [pipelineStages, setPipelineStages] = useState<PipelineStage[]>(INITIAL_PIPELINE_STAGES);
   const [modelResult, setModelResult] = useState<ModelPipelineResult | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [extractedFrames, setExtractedFrames] = useState<ExtractedFrame[]>([]);
@@ -41,6 +97,7 @@ const Index = () => {
       setResult(null);
       setModelResult(null);
       setExtractedFrames([]);
+      setPipelineStages(INITIAL_PIPELINE_STAGES);
       setStage("extracting");
       setProgress(0);
 
@@ -50,23 +107,29 @@ const Index = () => {
         // --- Upload to Flask + anomaly detection ---
         setStage("detecting");
         setProgress(5);
+        setPipelineStages(markStage(INITIAL_PIPELINE_STAGES, "upload", "running"));
 
         const tUploadStart = performance.now();
         const formData = new FormData();
         formData.append("video", file);
 
-        const anomalyResponse = await fetch(`${FLASK_API_BASE}/api/analyze`, {
+        const jobResponse = await fetch(`${FLASK_API_BASE}/api/jobs`, {
           method: "POST",
           body: formData,
         });
 
         timings.video_upload_ms = Math.round(performance.now() - tUploadStart);
 
-        const anomalyData = await anomalyResponse.json();
-        if (!anomalyResponse.ok || anomalyData.status !== "ok") {
-          throw new Error(anomalyData.message || "Anomaly detection failed.");
+        const jobData = await jobResponse.json();
+        if (!jobResponse.ok || !jobData.job_id) {
+          throw new Error(jobData.message || "Could not start anomaly detection.");
         }
 
+        const anomalyData = await waitForPipelineResult(
+          jobData.job_id,
+          setPipelineStages,
+          setProgress
+        );
         const events: AnomalyEvent[] = anomalyData.events ?? [];
         const videoDuration = Number(anomalyData.duration_sec ?? 0);
         const pipelineResult: ModelPipelineResult = {
@@ -76,6 +139,8 @@ const Index = () => {
           maxScore: Number(anomalyData.max_score ?? 0),
           meanScore: Number(anomalyData.mean_score ?? 0),
           nSegments: Number(anomalyData.n_segments ?? 0),
+          scores: anomalyData.scores ?? [],
+          smoothScores: anomalyData.smooth_scores ?? [],
           timings: anomalyData.timings,
         };
 
@@ -204,6 +269,7 @@ const Index = () => {
     setResult(null);
     setModelResult(null);
     setExtractedFrames([]);
+    setPipelineStages(INITIAL_PIPELINE_STAGES);
     setStage("idle");
     setProgress(0);
   };
@@ -266,9 +332,11 @@ const Index = () => {
 
           {/* Processing */}
           <AnimatePresence>
-            {isProcessing && (
+            {stage === "detecting" ? (
+              <PipelineStageBoard stages={pipelineStages} />
+            ) : isProcessing ? (
               <ProcessingStatus stage={stage} progress={progress} />
-            )}
+            ) : null}
           </AnimatePresence>
 
           {/* Results */}
@@ -326,6 +394,124 @@ const Index = () => {
   );
 };
 
+function markStage(
+  stages: PipelineStage[],
+  stageId: string,
+  status: PipelineStageStatus
+): PipelineStage[] {
+  return stages.map((stage) =>
+    stage.id === stageId ? { ...stage, status } : stage
+  );
+}
+
+async function waitForPipelineResult(
+  jobId: string,
+  setPipelineStages: Dispatch<SetStateAction<PipelineStage[]>>,
+  setProgress: Dispatch<SetStateAction<number>>
+) {
+  while (true) {
+    await sleep(700);
+    const response = await fetch(`${FLASK_API_BASE}/api/jobs/${jobId}`);
+    const job = await response.json();
+
+    if (!response.ok) {
+      throw new Error(job.message || "Could not read anomaly pipeline status.");
+    }
+
+    if (Array.isArray(job.stages)) {
+      setPipelineStages(job.stages);
+      setProgress(calculatePipelineProgress(job.stages));
+    }
+
+    if (job.status === "complete" && job.result) {
+      return job.result;
+    }
+
+    if (job.status === "error") {
+      throw new Error(job.message || "Anomaly detection failed.");
+    }
+  }
+}
+
+function calculatePipelineProgress(stages: PipelineStage[]): number {
+  if (stages.length === 0) return 5;
+  const doneWeight = stages.filter((stage) => stage.status === "done").length;
+  const runningWeight = stages.some((stage) => stage.status === "running") ? 0.5 : 0;
+  return Math.min(95, Math.round(((doneWeight + runningWeight) / stages.length) * 100));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function PipelineStageBoard({ stages }: { stages: PipelineStage[] }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0 }}
+      className="w-full rounded-xl border border-border/50 glass p-5"
+    >
+      <div className="mb-4 flex items-center justify-between gap-4">
+        <div>
+          <h3 className="font-mono text-sm font-semibold uppercase tracking-wider text-foreground">
+            Pretrained Model Pipeline
+          </h3>
+          <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+            Upload, FFmpeg preprocessing, X3D-M features, anomaly inference
+          </p>
+        </div>
+        <Activity className="h-5 w-5 animate-pulse text-primary" />
+      </div>
+
+      <div className="space-y-2">
+        {stages.map((stage, index) => (
+          <div
+            key={stage.id}
+            className="flex items-center gap-3 rounded-lg border border-border/40 bg-secondary/30 px-3 py-3"
+          >
+            <StageBadge status={stage.status} index={index} />
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-xs font-semibold uppercase tracking-wider text-foreground">
+                {stage.label}
+              </div>
+              <div className="truncate font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                {stage.description}
+              </div>
+            </div>
+            <div className="min-w-16 text-right font-mono text-xs text-muted-foreground">
+              {stage.status === "running"
+                ? `${(stage.elapsed_sec ?? 0).toFixed(1)}s`
+                : stage.duration_sec != null
+                  ? `${stage.duration_sec.toFixed(1)}s`
+                  : "--"}
+            </div>
+          </div>
+        ))}
+      </div>
+    </motion.div>
+  );
+}
+
+function StageBadge({ status, index }: { status: PipelineStageStatus; index: number }) {
+  const label =
+    status === "done" ? "OK" : status === "error" ? "!" : status === "running" ? "..." : `S${index}`;
+  const className =
+    status === "done"
+      ? "border-success/50 bg-success/10 text-success"
+      : status === "error"
+        ? "border-destructive/50 bg-destructive/10 text-destructive"
+        : status === "running"
+          ? "border-warning/50 bg-warning/10 text-warning"
+          : "border-border bg-muted/20 text-muted-foreground";
+
+  return (
+    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border font-mono text-[10px] ${className}`}>
+      {label}
+    </div>
+  );
+}
+
 function ModelPipelineCard({ result }: { result: ModelPipelineResult }) {
   return (
     <motion.div
@@ -369,6 +555,8 @@ function ModelPipelineCard({ result }: { result: ModelPipelineResult }) {
         <Metric label="Duration" value={formatTime(result.durationSec)} />
       </div>
 
+      <ScoreTimelineChart result={result} />
+
       <div className="rounded-lg border border-border/40 bg-muted/20 p-4">
         <div className="mb-3 flex items-center gap-2">
           <Clock className="h-4 w-4 text-primary" />
@@ -409,6 +597,92 @@ function Metric({ label, value }: { label: string; value: string }) {
         {label}
       </p>
       <p className="font-mono text-sm font-bold text-foreground">{value}</p>
+    </div>
+  );
+}
+
+function ScoreTimelineChart({ result }: { result: ModelPipelineResult }) {
+  const chartData = result.smoothScores.map((smooth, index) => ({
+    index,
+    time: (index * 8) / 30,
+    raw: result.scores[index] ?? smooth,
+    smooth,
+    event: result.events.some(
+      (event) => (index * 8) / 30 >= event.start_sec && (index * 8) / 30 <= event.end_sec
+    )
+      ? 0.5
+      : null,
+  }));
+
+  if (chartData.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="mb-4 rounded-lg border border-border/40 bg-muted/20 p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+          Anomaly Score Timeline
+        </span>
+        <span className="font-mono text-[10px] uppercase tracking-widest text-warning">
+          Threshold 0.50
+        </span>
+      </div>
+      <div className="h-52 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: -24 }}>
+            <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="3 3" vertical={false} />
+            <XAxis
+              dataKey="time"
+              tickFormatter={(value) => formatTime(Number(value))}
+              stroke="hsl(var(--muted-foreground))"
+              tick={{ fontSize: 10 }}
+            />
+            <YAxis
+              domain={[0, 1]}
+              stroke="hsl(var(--muted-foreground))"
+              tick={{ fontSize: 10 }}
+            />
+            <Tooltip
+              content={({ active, payload, label }) => {
+                if (!active || !payload?.length) return null;
+                const raw = payload.find((item) => item.dataKey === "raw")?.value;
+                const smooth = payload.find((item) => item.dataKey === "smooth")?.value;
+                return (
+                  <div className="rounded-md border border-border bg-background px-3 py-2 font-mono text-xs shadow-lg">
+                    <div className="text-foreground">{formatTime(Number(label))}</div>
+                    <div className="text-muted-foreground">raw: {Number(raw ?? 0).toFixed(3)}</div>
+                    <div className="text-primary">smooth: {Number(smooth ?? 0).toFixed(3)}</div>
+                  </div>
+                );
+              }}
+            />
+            <ReferenceLine y={0.5} stroke="hsl(var(--warning))" strokeDasharray="5 5" />
+            <Area
+              type="monotone"
+              dataKey="event"
+              fill="hsl(var(--destructive) / 0.18)"
+              stroke="transparent"
+              connectNulls={false}
+              isAnimationActive={false}
+            />
+            <Line
+              type="monotone"
+              dataKey="raw"
+              dot={false}
+              stroke="hsl(var(--destructive) / 0.35)"
+              strokeWidth={1}
+            />
+            <Line
+              type="monotone"
+              dataKey="smooth"
+              dot={false}
+              stroke="hsl(var(--primary))"
+              strokeWidth={2}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
     </div>
   );
 }
