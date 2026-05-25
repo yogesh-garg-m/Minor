@@ -1,0 +1,10 @@
+[
+  {
+    "video": "Abuse015_x264.npy",
+    "max_score": 0.9897302389144897,
+    "mean_score": 0.7015399932861328,
+    "std_score": 0.4343576729297638,
+    "is_anomalous": true,
+    "events": []
+  }
+]

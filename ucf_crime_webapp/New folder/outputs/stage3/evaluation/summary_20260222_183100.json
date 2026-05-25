@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-02-22T18:31:04.668445",
+  "frame_auc": 0.7775099232575234,
+  "frame_ap": 0.21562482048706044,
+  "fpr_at_90pct_tpr": 0.5526276412263639,
+  "video_auc": 0.8697619047619045,
+  "video_accuracy": 0.803448275862069,
+  "n_test_videos": 290,
+  "n_test_segments": 138559,
+  "annotation_based_frame_auc": true
+}

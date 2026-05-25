@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CrimeScan — Video Anomaly Detection</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  /* ── Reset & Base ──────────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0a0a0b;
+    --surface:  #111114;
+    --border:   #1e1e24;
+    --border2:  #2a2a34;
+    --text:     #e8e8f0;
+    --muted:    #5a5a70;
+    --accent:   #ff3c3c;
+    --accent2:  #ff7a3c;
+    --safe:     #3cff8f;
+    --warn:     #ffd23c;
+    --mono:     'Space Mono', monospace;
+    --sans:     'Syne', sans-serif;
+  }
+
+  html { font-size: 16px; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Scanline overlay ─────────────────────────────────────────────────── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ── Header ───────────────────────────────────────────────────────────── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.5rem 2.5rem;
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+    background: rgba(10,10,11,0.92);
+    backdrop-filter: blur(12px);
+  }
+
+  .logo {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    letter-spacing: 0.15em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  .logo span { color: var(--muted); }
+
+  .badge {
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    padding: 0.25rem 0.6rem;
+    border: 1px solid var(--border2);
+    color: var(--muted);
+    letter-spacing: 0.1em;
+  }
+
+  /* ── Main layout ──────────────────────────────────────────────────────── */
+  main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 3rem 2rem 6rem;
+  }
+
+  .hero {
+    margin-bottom: 3rem;
+  }
+  .hero h1 {
+    font-size: clamp(2rem, 5vw, 3.5rem);
+    font-weight: 800;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.75rem;
+  }
+  .hero h1 em {
+    font-style: normal;
+    color: var(--accent);
+  }
+  .hero p {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    letter-spacing: 0.05em;
+    line-height: 1.7;
+  }
+
+  /* ── Upload zone ──────────────────────────────────────────────────────── */
+  #drop-zone {
+    border: 1px dashed var(--border2);
+    padding: 3rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+    overflow: hidden;
+  }
+  #drop-zone:hover, #drop-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(255,60,60,0.03);
+  }
+  #drop-zone .upload-icon {
+    font-size: 2.5rem;
+    margin-bottom: 1rem;
+    display: block;
+    opacity: 0.4;
+  }
+  #drop-zone h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+  }
+  #drop-zone p {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+  }
+  #file-input { display: none; }
+
+  /* ── Progress ─────────────────────────────────────────────────────────── */
+  #progress-panel {
+    display: none;
+    margin-top: 2rem;
+    border: 1px solid var(--border);
+    padding: 1.5rem;
+  }
+
+  .stage-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .stage-row:last-child { border-bottom: none; }
+
+  .stage-icon {
+    width: 28px; height: 28px;
+    border: 1px solid var(--border2);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+  .stage-icon.active { border-color: var(--warn); color: var(--warn); }
+  .stage-icon.done   { border-color: var(--safe); color: var(--safe); }
+  .stage-icon.error  { border-color: var(--accent); color: var(--accent); }
+
+  .stage-label {
+    flex: 1;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.06em;
+  }
+  .stage-label .name { color: var(--text); }
+  .stage-label .desc { color: var(--muted); font-size: 0.65rem; }
+
+  .stage-time {
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    color: var(--muted);
+    min-width: 60px;
+    text-align: right;
+  }
+
+  /* Spinner */
+  .spin {
+    display: inline-block;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Results ──────────────────────────────────────────────────────────── */
+  #results-panel {
+    display: none;
+    margin-top: 2rem;
+  }
+
+  .verdict {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 1.5rem;
+    border: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+  }
+  .verdict.anomalous { border-color: var(--accent); background: rgba(255,60,60,0.04); }
+  .verdict.normal    { border-color: var(--safe);   background: rgba(60,255,143,0.04); }
+
+  .verdict-dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .anomalous .verdict-dot { background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+  .normal    .verdict-dot { background: var(--safe);   box-shadow: 0 0 12px var(--safe); }
+
+  .verdict-text h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 0.2rem;
+  }
+  .verdict-text p {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+  }
+
+  /* Stats row */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+  }
+  .stat-cell {
+    background: var(--surface);
+    padding: 1rem;
+  }
+  .stat-cell .label {
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 0.4rem;
+  }
+  .stat-cell .value {
+    font-family: var(--mono);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  /* ── Score timeline ───────────────────────────────────────────────────── */
+  .section-title {
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 0.75rem;
+  }
+
+  #timeline-wrap {
+    margin-bottom: 1.5rem;
+  }
+
+  #score-canvas {
+    width: 100%;
+    height: 120px;
+    display: block;
+    border: 1px solid var(--border);
+    cursor: crosshair;
+  }
+
+  .timeline-labels {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    color: var(--muted);
+    margin-top: 0.3rem;
+    padding: 0 2px;
+  }
+
+  /* Tooltip */
+  #canvas-tooltip {
+    position: fixed;
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    padding: 0.4rem 0.7rem;
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    color: var(--text);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.1s;
+    z-index: 200;
+  }
+
+  /* ── Events table ─────────────────────────────────────────────────────── */
+  .events-section { margin-bottom: 2rem; }
+
+  .no-events {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--safe);
+    padding: 1rem;
+    border: 1px solid var(--border);
+    letter-spacing: 0.06em;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+  }
+  thead tr {
+    border-bottom: 1px solid var(--border2);
+  }
+  th {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    color: var(--muted);
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    font-weight: 400;
+  }
+  td {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+  tr:last-child td { border-bottom: none; }
+  .event-num {
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  /* Timings */
+  .timings-row {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+  }
+  .timing-chip {
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    padding: 0.25rem 0.5rem;
+  }
+
+  /* ── Reset button ─────────────────────────────────────────────────────── */
+  #reset-btn {
+    display: none;
+    margin-top: 2rem;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border2);
+    padding: 0.6rem 1.2rem;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: color 0.2s, border-color 0.2s;
+  }
+  #reset-btn:hover { color: var(--text); border-color: var(--text); }
+
+  /* ── Error banner ─────────────────────────────────────────────────────── */
+  #error-banner {
+    display: none;
+    margin-top: 1.5rem;
+    border: 1px solid var(--accent);
+    padding: 1rem 1.25rem;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--accent);
+    letter-spacing: 0.04em;
+  }
+
+  /* ── Responsive ───────────────────────────────────────────────────────── */
+  @media (max-width: 600px) {
+    header { padding: 1rem 1.25rem; }
+    main { padding: 2rem 1.25rem 4rem; }
+    .hero h1 { font-size: 2rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">CRIME<span>SCAN</span> // UCF-CRIME</div>
+  <div class="badge">X3D-M + TCN MIL</div>
+</header>
+
+<main>
+  <div class="hero">
+    <h1>Detect <em>anomalies</em><br>in surveillance video.</h1>
+    <p>
+      UPLOAD VIDEO → PREPROCESS → X3D-M FEATURES → TCN+MIL INFERENCE → TIMESTAMPS
+    </p>
+  </div>
+
+  <!-- Upload -->
+  <div id="drop-zone">
+    <span class="upload-icon">⬡</span>
+    <h2>Drop video file here</h2>
+    <p>MP4 · AVI · MOV · MKV &nbsp;|&nbsp; MAX 2 GB</p>
+    <input type="file" id="file-input" accept="video/*">
+  </div>
+
+  <!-- Error -->
+  <div id="error-banner"></div>
+
+  <!-- Progress -->
+  <div id="progress-panel">
+    <div class="stage-row" id="stage-upload">
+      <div class="stage-icon" id="icon-upload">S0</div>
+      <div class="stage-label">
+        <div class="name">UPLOAD</div>
+        <div class="desc">Receiving video file</div>
+      </div>
+      <div class="stage-time" id="time-upload">—</div>
+    </div>
+    <div class="stage-row" id="stage-preprocess">
+      <div class="stage-icon" id="icon-preprocess">S1</div>
+      <div class="stage-label">
+        <div class="name">PREPROCESS</div>
+        <div class="desc">FFmpeg · 224×224 · 30 fps · strip audio</div>
+      </div>
+      <div class="stage-time" id="time-preprocess">—</div>
+    </div>
+    <div class="stage-row" id="stage-features">
+      <div class="stage-icon" id="icon-features">S2</div>
+      <div class="stage-label">
+        <div class="name">FEATURE EXTRACTION</div>
+        <div class="desc">X3D-M · 16-frame windows · 50% overlap · (N, 2048)</div>
+      </div>
+      <div class="stage-time" id="time-features">—</div>
+    </div>
+    <div class="stage-row" id="stage-infer">
+      <div class="stage-icon" id="icon-infer">S3</div>
+      <div class="stage-label">
+        <div class="name">INFERENCE</div>
+        <div class="desc">MultiScaleTCN + MIL scorer · median smoothing</div>
+      </div>
+      <div class="stage-time" id="time-infer">—</div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="results-panel">
+
+    <div id="verdict-box" class="verdict"></div>
+
+    <div class="stats-row" id="stats-row"></div>
+
+    <div id="timeline-wrap">
+      <div class="section-title">ANOMALY SCORE TIMELINE</div>
+      <canvas id="score-canvas"></canvas>
+      <div class="timeline-labels">
+        <span id="t-start">0:00</span>
+        <span id="t-mid"></span>
+        <span id="t-end"></span>
+      </div>
+    </div>
+
+    <div class="events-section">
+      <div class="section-title">DETECTED EVENTS</div>
+      <div id="events-container"></div>
+    </div>
+
+    <div class="timings-row" id="timings-row"></div>
+  </div>
+
+  <button id="reset-btn">↩ Analyze another video</button>
+</main>
+
+<div id="canvas-tooltip"></div>
+
+<script>
+/* ── State ─────────────────────────────────────────────────────────────── */
+let resultData = null;
+
+/* ── DOM refs ───────────────────────────────────────────────────────────── */
+const dropZone   = document.getElementById('drop-zone');
+const fileInput  = document.getElementById('file-input');
+const progPanel  = document.getElementById('progress-panel');
+const resPanel   = document.getElementById('results-panel');
+const errBanner  = document.getElementById('error-banner');
+const resetBtn   = document.getElementById('reset-btn');
+const tooltip    = document.getElementById('canvas-tooltip');
+const canvas     = document.getElementById('score-canvas');
+const ctx        = canvas.getContext('2d');
+
+/* ── Upload handling ────────────────────────────────────────────────────── */
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) startAnalysis(e.target.files[0]);
+});
+dropZone.addEventListener('dragover', e => {
+  e.preventDefault(); dropZone.classList.add('drag-over');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f) startAnalysis(f);
+});
+
+resetBtn.addEventListener('click', reset);
+
+/* ── Stage helpers ──────────────────────────────────────────────────────── */
+function setStage(id, state, timeStr) {
+  const icon = document.getElementById('icon-' + id);
+  const time = document.getElementById('time-' + id);
+  icon.className = 'stage-icon ' + state;
+  if (state === 'active') icon.innerHTML = '<span class="spin">◌</span>';
+  else if (state === 'done')  icon.innerHTML = '✓';
+  else if (state === 'error') icon.innerHTML = '✗';
+  if (timeStr !== undefined && time) time.textContent = timeStr;
+}
+
+/* ── Main analysis flow ─────────────────────────────────────────────────── */
+async function startAnalysis(file) {
+  reset(false);
+  hideError();
+
+  dropZone.style.display = 'none';
+  progPanel.style.display = 'block';
+
+  const t0 = performance.now();
+
+  // S0 upload
+  setStage('upload', 'active');
+
+  const form = new FormData();
+  form.append('video', file);
+
+  let resp;
+  try {
+    resp = await fetch('/analyze', { method: 'POST', body: form });
+  } catch (e) {
+    showError('Network error: ' + e.message);
+    setStage('upload', 'error');
+    return;
+  }
+
+  const uploadMs = performance.now() - t0;
+  setStage('upload', 'done', (uploadMs/1000).toFixed(1) + 's');
+
+  // Mark all pipeline stages active while server processes
+  setStage('preprocess', 'active');
+  setStage('features',   'active');
+  setStage('infer',      'active');
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    showError('Invalid server response');
+    setStage('preprocess', 'error');
+    setStage('features',   'error');
+    setStage('infer',      'error');
+    return;
+  }
+
+  if (data.status !== 'ok') {
+    showError(data.message || 'Unknown server error');
+    setStage('preprocess', 'error');
+    setStage('features',   'error');
+    setStage('infer',      'error');
+    return;
+  }
+
+  // Update timing chips from server-reported timings
+  const t = data.timings || {};
+  setStage('preprocess', 'done', (t.preprocess_sec || '?') + 's');
+  setStage('features',   'done', (t.features_sec   || '?') + 's');
+  setStage('infer',      'done', (t.infer_sec       || '?') + 's');
+
+  resultData = data;
+  renderResults(data);
+}
+
+/* ── Render results ─────────────────────────────────────────────────────── */
+function renderResults(d) {
+  resPanel.style.display = 'block';
+  resetBtn.style.display = 'inline-block';
+
+  // Verdict
+  const vbox = document.getElementById('verdict-box');
+  if (d.is_anomalous) {
+    vbox.className = 'verdict anomalous';
+    vbox.innerHTML = `
+      <div class="verdict-dot"></div>
+      <div class="verdict-text">
+        <h3>ANOMALY DETECTED</h3>
+        <p>${d.events.length} event(s) found in "${d.filename}"</p>
+      </div>`;
+  } else {
+    vbox.className = 'verdict normal';
+    vbox.innerHTML = `
+      <div class="verdict-dot"></div>
+      <div class="verdict-text">
+        <h3>NO ANOMALY DETECTED</h3>
+        <p>All segments scored below threshold in "${d.filename}"</p>
+      </div>`;
+  }
+
+  // Stats
+  const statsRow = document.getElementById('stats-row');
+  const dur = fmtDuration(d.duration_sec);
+  statsRow.innerHTML = `
+    <div class="stat-cell"><div class="label">DURATION</div><div class="value">${dur}</div></div>
+    <div class="stat-cell"><div class="label">SEGMENTS</div><div class="value">${d.n_segments.toLocaleString()}</div></div>
+    <div class="stat-cell"><div class="label">MAX SCORE</div><div class="value">${d.max_score.toFixed(3)}</div></div>
+    <div class="stat-cell"><div class="label">MEAN SCORE</div><div class="value">${d.mean_score.toFixed(3)}</div></div>
+    <div class="stat-cell"><div class="label">EVENTS</div><div class="value">${d.events.length}</div></div>
+  `;
+
+  // Timeline
+  drawTimeline(d);
+
+  // Events
+  renderEvents(d.events);
+
+  // Timings
+  const t = d.timings || {};
+  const tRow = document.getElementById('timings-row');
+  tRow.innerHTML = [
+    ['PREPROCESS', t.preprocess_sec],
+    ['FEATURES',   t.features_sec],
+    ['INFERENCE',  t.infer_sec],
+    ['TOTAL',      t.total_sec],
+  ].map(([k,v]) => `<div class="timing-chip">${k}: ${v ?? '?'}s</div>`).join('');
+
+  // Timeline labels
+  document.getElementById('t-start').textContent = secToHMS(0);
+  document.getElementById('t-mid').textContent   = secToHMS(d.duration_sec / 2);
+  document.getElementById('t-end').textContent   = secToHMS(d.duration_sec);
+}
+
+/* ── Canvas timeline ────────────────────────────────────────────────────── */
+function drawTimeline(d) {
+  const scores = d.smooth_scores;
+  const raw    = d.scores;
+  const W = canvas.offsetWidth;
+  const H = 120;
+  canvas.width  = W;
+  canvas.height = H;
+
+  const PAD = 2;
+
+  // Background
+  ctx.fillStyle = '#111114';
+  ctx.fillRect(0, 0, W, H);
+
+  // Threshold line
+  const thY = H - PAD - (0.5 * (H - 2*PAD));
+  ctx.strokeStyle = 'rgba(255,210,60,0.25)';
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(0, thY); ctx.lineTo(W, thY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const n = scores.length;
+  if (n < 2) return;
+
+  const xOf = i => PAD + (i / (n - 1)) * (W - 2*PAD);
+  const yOf = v => H - PAD - v * (H - 2*PAD);
+
+  // Event shading
+  d.events.forEach(ev => {
+    const segStart = Math.round(ev.start_sec * 30 / 8);  // sec * fps / stride
+    const segEnd   = Math.round(ev.end_sec   * 30 / 8);
+    const x1 = xOf(Math.max(0, segStart));
+    const x2 = xOf(Math.min(n-1, segEnd));
+    ctx.fillStyle = 'rgba(255,60,60,0.12)';
+    ctx.fillRect(x1, 0, x2-x1, H);
+  });
+
+  // Raw scores (dim)
+  ctx.strokeStyle = 'rgba(255,100,60,0.25)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  raw.forEach((v, i) => {
+    i === 0 ? ctx.moveTo(xOf(i), yOf(v)) : ctx.lineTo(xOf(i), yOf(v));
+  });
+  ctx.stroke();
+
+  // Smooth scores (bright)
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0,   'rgba(255,60,60,0.9)');
+  grad.addColorStop(0.5, 'rgba(255,122,60,0.7)');
+  grad.addColorStop(1,   'rgba(255,60,60,0.3)');
+
+  ctx.strokeStyle = grad;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  scores.forEach((v, i) => {
+    i === 0 ? ctx.moveTo(xOf(i), yOf(v)) : ctx.lineTo(xOf(i), yOf(v));
+  });
+  ctx.stroke();
+
+  // Fill under curve
+  ctx.lineTo(xOf(n-1), H); ctx.lineTo(xOf(0), H); ctx.closePath();
+  ctx.fillStyle = 'rgba(255,60,60,0.07)';
+  ctx.fill();
+
+  // Hover interaction
+  canvas.onmousemove = e => {
+    const rect = canvas.getBoundingClientRect();
+    const mx   = e.clientX - rect.left;
+    const idx  = Math.round(((mx - PAD) / (W - 2*PAD)) * (n - 1));
+    if (idx < 0 || idx >= n) return;
+
+    const timeSec = idx * 8 / 30;
+    tooltip.style.opacity  = '1';
+    tooltip.style.left     = (e.clientX + 12) + 'px';
+    tooltip.style.top      = (e.clientY - 8)  + 'px';
+    tooltip.textContent    = `${secToHMS(timeSec)}  score: ${scores[idx].toFixed(3)}`;
+
+    // Cursor line
+    drawTimeline(d);
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(xOf(idx), 0); ctx.lineTo(xOf(idx), H);
+    ctx.stroke();
+  };
+  canvas.onmouseleave = () => { tooltip.style.opacity = '0'; drawTimeline(d); };
+}
+
+/* ── Events table ───────────────────────────────────────────────────────── */
+function renderEvents(events) {
+  const container = document.getElementById('events-container');
+  if (!events || events.length === 0) {
+    container.innerHTML = '<div class="no-events">✓ No anomalous events detected.</div>';
+    return;
+  }
+  let html = `<table>
+    <thead><tr>
+      <th>#</th><th>START</th><th>END</th><th>DURATION</th>
+    </tr></thead><tbody>`;
+  events.forEach((ev, i) => {
+    const dur = (ev.end_sec - ev.start_sec).toFixed(1);
+    html += `<tr>
+      <td class="event-num">${String(i+1).padStart(2,'0')}</td>
+      <td>${ev.start_hms}</td>
+      <td>${ev.end_hms}</td>
+      <td>${dur}s</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+/* ── Helpers ────────────────────────────────────────────────────────────── */
+function secToHMS(s) {
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = (s % 60).toFixed(0).padStart(2,'0');
+  return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${sec}` : `${m}:${sec}`;
+}
+
+function fmtDuration(s) {
+  if (s >= 3600) return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+  if (s >= 60)   return `${Math.floor(s/60)}m ${(s%60).toFixed(0)}s`;
+  return `${s.toFixed(1)}s`;
+}
+
+function showError(msg) {
+  errBanner.style.display = 'block';
+  errBanner.textContent   = '✗ ERROR: ' + msg;
+  progPanel.style.display = 'none';
+  dropZone.style.display  = 'block';
+}
+function hideError() {
+  errBanner.style.display = 'none';
+}
+
+function reset(showDrop = true) {
+  resultData = null;
+  if (showDrop) dropZone.style.display = 'block';
+  progPanel.style.display  = 'none';
+  resPanel.style.display   = 'none';
+  resetBtn.style.display   = 'none';
+  errBanner.style.display  = 'none';
+  fileInput.value          = '';
+  ['upload','preprocess','features','infer'].forEach(id => {
+    const icon = document.getElementById('icon-'+id);
+    const time = document.getElementById('time-'+id);
+    icon.className = 'stage-icon';
+    icon.textContent = { upload:'S0', preprocess:'S1', features:'S2', infer:'S3' }[id];
+    if (time) time.textContent = '—';
+  });
+}
+</script>
+</body>
+</html>
